@@ -1,4 +1,5 @@
 using ICSharpCode.SharpZipLib.Checksum;
+using ICSharpCode.SharpZipLib.Core;
 using ICSharpCode.SharpZipLib.Zip.Compression;
 using ICSharpCode.SharpZipLib.Zip.Compression.Streams;
 using System;
@@ -95,7 +96,7 @@ namespace ICSharpCode.SharpZipLib.Zip
 		/// <param name="comment">
 		/// The comment text for the entire archive.
 		/// </param>
-		/// <exception name ="ArgumentOutOfRangeException">
+		/// <exception cref="ArgumentOutOfRangeException">
 		/// The converted comment is longer than 0xffff bytes.
 		/// </exception>
 		public void SetComment(string comment)
@@ -147,6 +148,12 @@ namespace ICSharpCode.SharpZipLib.Zip
 		}
 
 		/// <summary>
+		/// Used for transforming the names of entries added by <see cref="PutNextEntry(ZipEntry)"/>.
+		/// Defaults to <see cref="PathTransformer"/>, set to null to disable transforms and use names as supplied.
+		/// </summary>
+		public INameTransform NameTransform { get; set; } = new PathTransformer();
+
+		/// <summary>
 		/// Write an unsigned short in little endian byte order.
 		/// </summary>
 		private void WriteLeShort(int value)
@@ -182,6 +189,22 @@ namespace ICSharpCode.SharpZipLib.Zip
 			}
 		}
 
+		// Apply any configured transforms/cleaning to the name of the supplied entry.
+		private void TransformEntryName(ZipEntry entry)
+		{
+			if (this.NameTransform != null)
+			{
+				if (entry.IsDirectory)
+				{
+					entry.Name = this.NameTransform.TransformDirectory(entry.Name);
+				}
+				else
+				{
+					entry.Name = this.NameTransform.TransformFile(entry.Name);
+				}
+			}
+		}
+
 		/// <summary>
 		/// Starts a new Zip entry. It automatically closes the previous
 		/// entry if present.
@@ -206,6 +229,9 @@ namespace ICSharpCode.SharpZipLib.Zip
 		/// Entry name is too long<br/>
 		/// Finish has already been called<br/>
 		/// </exception>
+		/// <exception cref="System.NotImplementedException">
+		/// The Compression method specified for the entry is unsupported.
+		/// </exception>
 		public void PutNextEntry(ZipEntry entry)
 		{
 			if (entry == null)
@@ -229,6 +255,13 @@ namespace ICSharpCode.SharpZipLib.Zip
 			}
 
 			CompressionMethod method = entry.CompressionMethod;
+
+			// Check that the compression is one that we support
+			if (method != CompressionMethod.Deflated && method != CompressionMethod.Stored)
+			{
+				throw new NotImplementedException("Compression method not supported");
+			}
+
 			int compressionLevel = defaultCompressionLevel;
 
 			// Clear flags that the library manages internally
@@ -327,7 +360,7 @@ namespace ICSharpCode.SharpZipLib.Zip
 				}
 				else
 				{
-					WriteLeInt(entry.IsCrypted ? (int)entry.CompressedSize + ZipConstants.CryptoHeaderSize : (int)entry.CompressedSize);
+					WriteLeInt((int)entry.CompressedSize + entry.EncryptionOverheadSize);
 					WriteLeInt((int)entry.Size);
 				}
 			}
@@ -357,6 +390,8 @@ namespace ICSharpCode.SharpZipLib.Zip
 				}
 			}
 
+			// Apply any required transforms to the entry name, and then convert to byte array format.
+			TransformEntryName(entry);
 			byte[] name = ZipStrings.ConvertToArray(entry.Flags, entry.Name);
 
 			if (name.Length > 0xFFFF)
@@ -372,7 +407,7 @@ namespace ICSharpCode.SharpZipLib.Zip
 				if (headerInfoAvailable)
 				{
 					ed.AddLeLong(entry.Size);
-					ed.AddLeLong(entry.CompressedSize);
+					ed.AddLeLong(entry.CompressedSize + entry.EncryptionOverheadSize);
 				}
 				else
 				{
@@ -530,14 +565,7 @@ namespace ICSharpCode.SharpZipLib.Zip
 
 			if (curEntry.IsCrypted)
 			{
-				if (curEntry.AESKeySize > 0)
-				{
-					curEntry.CompressedSize += curEntry.AESOverheadSize;
-				}
-				else
-				{
-					curEntry.CompressedSize += ZipConstants.CryptoHeaderSize;
-				}
+				curEntry.CompressedSize += curEntry.EncryptionOverheadSize;
 			}
 
 			// Patch the header if possible
